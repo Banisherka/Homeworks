@@ -1,0 +1,734 @@
+openapi: 3.0.3
+info:
+  description: |
+    API трекера привычек: пользователь заводит привычки («пить воду», «бегать»),
+    смотрит их список, правит и удаляет.
+
+    **Зачем этот API:** чтобы мобильное и веб-приложение работали с одним и тем же
+    списком привычек пользователя и никто не видел чужие.
+
+    **Договорённости**
+    * Каждый запрос требует JWT в заголовке Authorization: Bearer (JWT).
+    * Пользователь видит и меняет только свои привычки.
+    * Наружу отдаём только DTO из components/schemas. Внутренние поля хранилища
+      (ownerId, служебный номер строки в БД, версия записи для блокировок, deletedAt)
+      в ответах и запросах не появляются: владелец определяется по токену.
+  title: Habit Tracker API
+  version: 1.0.0
+servers:
+- description: Локальный запуск
+  url: http://localhost:8080/api/v1
+tags:
+- description: Привычки текущего пользователя
+  name: habits
+paths:
+  /habits:
+    get:
+      description: Возвращает страницу привычек. Чужие привычки в выдачу не попадают.
+      operationId: listHabits
+      parameters:
+      - description: Какие привычки показывать.
+        explode: true
+        in: query
+        name: status
+        required: false
+        schema:
+          $ref: "#/components/schemas/StatusFilter"
+        style: form
+      - description: Фильтр по периодичности.
+        explode: true
+        in: query
+        name: frequency
+        required: false
+        schema:
+          $ref: "#/components/schemas/Frequency"
+        style: form
+      - description: Сколько записей вернуть.
+        explode: true
+        in: query
+        name: limit
+        required: false
+        schema:
+          default: 20
+          maximum: 100
+          minimum: 1
+          type: integer
+        style: form
+      - description: Сколько записей пропустить с начала.
+        explode: true
+        in: query
+        name: offset
+        required: false
+        schema:
+          default: 0
+          minimum: 0
+          type: integer
+        style: form
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HabitPage"
+          description: Страница привычек.
+        "400":
+          content:
+            application/json:
+              example:
+                code: validation_failed
+                message: Запрос не прошёл проверку
+                fieldErrors:
+                - field: title
+                  message: не может быть пустым
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Запрос некорректен: неверный параметр, пустое или слишком длинное поле,
+            пустое тело у PATCH. Исправьте запрос и повторите.
+        "401":
+          content:
+            application/json:
+              example:
+                code: unauthorized
+                message: Нужен действующий токен
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Сервис не знает, кто вы: заголовок Authorization отсутствует, токен просрочен
+            или подпись неверна. Получите новый токен и повторите.
+          headers:
+            WWW-Authenticate:
+              description: Схема аутентификации.
+              explode: false
+              schema:
+                example: Bearer
+                type: string
+              style: simple
+      security:
+      - bearerAuth: []
+      summary: Список привычек текущего пользователя
+      tags:
+      - habits
+    post:
+      description: "Создаёт привычку для текущего пользователя. Владелец берётся и\
+        з токена, а не из тела запроса."
+      operationId: createHabit
+      requestBody:
+        content:
+          application/json:
+            example:
+              title: Пить воду
+              description: Два литра в день
+              frequency: DAILY
+              targetPerPeriod: 1
+            schema:
+              $ref: "#/components/schemas/HabitCreate"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Habit"
+          description: Привычка создана.
+          headers:
+            Location:
+              description: Адрес созданной привычки.
+              explode: false
+              schema:
+                example: /api/v1/habits/3fa85f64-5717-4562-b3fc-2c963f66afa6
+                type: string
+              style: simple
+        "400":
+          content:
+            application/json:
+              example:
+                code: validation_failed
+                message: Запрос не прошёл проверку
+                fieldErrors:
+                - field: title
+                  message: не может быть пустым
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Запрос некорректен: неверный параметр, пустое или слишком длинное поле,
+            пустое тело у PATCH. Исправьте запрос и повторите.
+        "401":
+          content:
+            application/json:
+              example:
+                code: unauthorized
+                message: Нужен действующий токен
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Сервис не знает, кто вы: заголовок Authorization отсутствует, токен просрочен
+            или подпись неверна. Получите новый токен и повторите.
+          headers:
+            WWW-Authenticate:
+              description: Схема аутентификации.
+              explode: false
+              schema:
+                example: Bearer
+                type: string
+              style: simple
+        "409":
+          content:
+            application/json:
+              example:
+                code: habit_already_exists
+                message: Привычка с таким названием уже есть
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Привычка с таким названием у вас уже есть.
+      security:
+      - bearerAuth: []
+      summary: Создать привычку
+      tags:
+      - habits
+      x-python-fastapi-request-body-example:
+        title: Пить воду
+        description: Два литра в день
+        frequency: DAILY
+        targetPerPeriod: 1
+  /habits/{habitId}:
+    delete:
+      description: "Удаляет привычку насовсем. Если нужно просто спрятать, лучше а\
+        рхивировать через PATCH."
+      operationId: deleteHabit
+      parameters:
+      - description: Идентификатор привычки (UUID).
+        explode: false
+        in: path
+        name: habitId
+        required: true
+        schema:
+          format: uuid
+          type: string
+        style: simple
+      responses:
+        "204":
+          description: "Привычка удалена, тела ответа нет."
+        "401":
+          content:
+            application/json:
+              example:
+                code: unauthorized
+                message: Нужен действующий токен
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Сервис не знает, кто вы: заголовок Authorization отсутствует, токен просрочен
+            или подпись неверна. Получите новый токен и повторите.
+          headers:
+            WWW-Authenticate:
+              description: Схема аутентификации.
+              explode: false
+              schema:
+                example: Bearer
+                type: string
+              style: simple
+        "403":
+          content:
+            application/json:
+              example:
+                code: forbidden
+                message: Эта привычка вам не принадлежит
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Сервис знает, кто вы, но эта привычка принадлежит другому пользователю.
+            Повторять запрос с тем же токеном бессмысленно.
+        "404":
+          content:
+            application/json:
+              example:
+                code: habit_not_found
+                message: Привычка не найдена
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Привычки с таким идентификатором нет.
+      security:
+      - bearerAuth: []
+      summary: Удалить привычку
+      tags:
+      - habits
+    get:
+      operationId: getHabit
+      parameters:
+      - description: Идентификатор привычки (UUID).
+        explode: false
+        in: path
+        name: habitId
+        required: true
+        schema:
+          format: uuid
+          type: string
+        style: simple
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Habit"
+          description: Привычка найдена.
+        "401":
+          content:
+            application/json:
+              example:
+                code: unauthorized
+                message: Нужен действующий токен
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Сервис не знает, кто вы: заголовок Authorization отсутствует, токен просрочен
+            или подпись неверна. Получите новый токен и повторите.
+          headers:
+            WWW-Authenticate:
+              description: Схема аутентификации.
+              explode: false
+              schema:
+                example: Bearer
+                type: string
+              style: simple
+        "403":
+          content:
+            application/json:
+              example:
+                code: forbidden
+                message: Эта привычка вам не принадлежит
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Сервис знает, кто вы, но эта привычка принадлежит другому пользователю.
+            Повторять запрос с тем же токеном бессмысленно.
+        "404":
+          content:
+            application/json:
+              example:
+                code: habit_not_found
+                message: Привычка не найдена
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Привычки с таким идентификатором нет.
+      security:
+      - bearerAuth: []
+      summary: Получить одну привычку
+      tags:
+      - habits
+    patch:
+      description: |
+        Меняет только переданные поля, остальные остаются как были.
+        Чтобы отправить привычку в архив, передайте archived = true.
+      operationId: updateHabit
+      parameters:
+      - description: Идентификатор привычки (UUID).
+        explode: false
+        in: path
+        name: habitId
+        required: true
+        schema:
+          format: uuid
+          type: string
+        style: simple
+      requestBody:
+        content:
+          application/json:
+            example:
+              archived: true
+            schema:
+              $ref: "#/components/schemas/HabitUpdate"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Habit"
+          description: "Привычка изменена, в ответе её новое состояние."
+        "400":
+          content:
+            application/json:
+              example:
+                code: validation_failed
+                message: Запрос не прошёл проверку
+                fieldErrors:
+                - field: title
+                  message: не может быть пустым
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Запрос некорректен: неверный параметр, пустое или слишком длинное поле,
+            пустое тело у PATCH. Исправьте запрос и повторите.
+        "401":
+          content:
+            application/json:
+              example:
+                code: unauthorized
+                message: Нужен действующий токен
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Сервис не знает, кто вы: заголовок Authorization отсутствует, токен просрочен
+            или подпись неверна. Получите новый токен и повторите.
+          headers:
+            WWW-Authenticate:
+              description: Схема аутентификации.
+              explode: false
+              schema:
+                example: Bearer
+                type: string
+              style: simple
+        "403":
+          content:
+            application/json:
+              example:
+                code: forbidden
+                message: Эта привычка вам не принадлежит
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: |
+            Сервис знает, кто вы, но эта привычка принадлежит другому пользователю.
+            Повторять запрос с тем же токеном бессмысленно.
+        "404":
+          content:
+            application/json:
+              example:
+                code: habit_not_found
+                message: Привычка не найдена
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Привычки с таким идентификатором нет.
+      security:
+      - bearerAuth: []
+      summary: Частично изменить привычку
+      tags:
+      - habits
+      x-python-fastapi-request-body-example:
+        archived: true
+components:
+  parameters:
+    HabitId:
+      description: Идентификатор привычки (UUID).
+      explode: false
+      in: path
+      name: habitId
+      required: true
+      schema:
+        format: uuid
+        type: string
+      style: simple
+  responses:
+    BadRequest:
+      content:
+        application/json:
+          example:
+            code: validation_failed
+            message: Запрос не прошёл проверку
+            fieldErrors:
+            - field: title
+              message: не может быть пустым
+          schema:
+            $ref: "#/components/schemas/Error"
+      description: |
+        Запрос некорректен: неверный параметр, пустое или слишком длинное поле,
+        пустое тело у PATCH. Исправьте запрос и повторите.
+    Unauthorized:
+      content:
+        application/json:
+          example:
+            code: unauthorized
+            message: Нужен действующий токен
+          schema:
+            $ref: "#/components/schemas/Error"
+      description: |
+        Сервис не знает, кто вы: заголовок Authorization отсутствует, токен просрочен
+        или подпись неверна. Получите новый токен и повторите.
+      headers:
+        WWW-Authenticate:
+          description: Схема аутентификации.
+          explode: false
+          schema:
+            example: Bearer
+            type: string
+          style: simple
+    Forbidden:
+      content:
+        application/json:
+          example:
+            code: forbidden
+            message: Эта привычка вам не принадлежит
+          schema:
+            $ref: "#/components/schemas/Error"
+      description: |
+        Сервис знает, кто вы, но эта привычка принадлежит другому пользователю.
+        Повторять запрос с тем же токеном бессмысленно.
+    NotFound:
+      content:
+        application/json:
+          example:
+            code: habit_not_found
+            message: Привычка не найдена
+          schema:
+            $ref: "#/components/schemas/Error"
+      description: Привычки с таким идентификатором нет.
+    Conflict:
+      content:
+        application/json:
+          example:
+            code: habit_already_exists
+            message: Привычка с таким названием уже есть
+          schema:
+            $ref: "#/components/schemas/Error"
+      description: Привычка с таким названием у вас уже есть.
+  schemas:
+    StatusFilter:
+      default: active
+      description: Какие привычки показывать в списке.
+      enum:
+      - active
+      - archived
+      - all
+      title: StatusFilter
+      type: string
+    Frequency:
+      description: Как часто нужно выполнять привычку.
+      enum:
+      - DAILY
+      - WEEKLY
+      title: Frequency
+      type: string
+    Habit:
+      description: "Привычка в том виде, в каком её видит клиент."
+      example:
+        id: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+        title: Пить воду
+        description: Два литра в день
+        frequency: DAILY
+        targetPerPeriod: 1
+        archived: false
+        currentStreak: 5
+        createdAt: 2000-01-23T04:56:07.000+00:00
+      properties:
+        id:
+          format: uuid
+          readOnly: true
+          title: id
+          type: string
+        title:
+          example: Пить воду
+          maxLength: 100
+          minLength: 1
+          title: title
+          type: string
+        description:
+          example: Два литра в день
+          maxLength: 500
+          title: description
+          type: string
+        frequency:
+          $ref: "#/components/schemas/Frequency"
+        targetPerPeriod:
+          description: Сколько раз за период нужно выполнить привычку.
+          example: 1
+          maximum: 7
+          minimum: 1
+          title: targetPerPeriod
+          type: integer
+        archived:
+          description: Привычка в архиве и не показывается в списке по умолчанию.
+          example: false
+          title: archived
+          type: boolean
+        currentStreak:
+          description: Сколько периодов подряд привычка выполнена. Считает сервер.
+          example: 5
+          minimum: 0
+          readOnly: true
+          title: currentStreak
+          type: integer
+        createdAt:
+          format: date-time
+          readOnly: true
+          title: createdAt
+          type: string
+      required:
+      - archived
+      - createdAt
+      - currentStreak
+      - frequency
+      - id
+      - targetPerPeriod
+      - title
+      title: Habit
+      type: object
+    HabitCreate:
+      additionalProperties: false
+      description: "Данные для создания привычки. Поля id, владелец и серия считае\
+        т сервер."
+      example:
+        title: title
+        description: description
+        frequency: DAILY
+        targetPerPeriod: 1
+      properties:
+        title:
+          maxLength: 100
+          minLength: 1
+          title: title
+          type: string
+        description:
+          maxLength: 500
+          title: description
+          type: string
+        frequency:
+          $ref: "#/components/schemas/Frequency"
+        targetPerPeriod:
+          default: 1
+          maximum: 7
+          minimum: 1
+          title: targetPerPeriod
+          type: integer
+      required:
+      - frequency
+      - title
+      title: HabitCreate
+      type: object
+    HabitUpdate:
+      additionalProperties: false
+      description: Частичное изменение привычки. Нужно передать хотя бы одно поле.
+      example:
+        title: title
+        description: description
+        frequency: DAILY
+        targetPerPeriod: 1
+        archived: true
+      minProperties: 1
+      properties:
+        title:
+          maxLength: 100
+          minLength: 1
+          title: title
+          type: string
+        description:
+          maxLength: 500
+          title: description
+          type: string
+        frequency:
+          $ref: "#/components/schemas/Frequency"
+        targetPerPeriod:
+          maximum: 7
+          minimum: 1
+          title: targetPerPeriod
+          type: integer
+        archived:
+          title: archived
+          type: boolean
+      title: HabitUpdate
+      type: object
+    HabitPage:
+      description: Страница списка привычек.
+      example:
+        items:
+        - id: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+          title: Пить воду
+          description: Два литра в день
+          frequency: DAILY
+          targetPerPeriod: 1
+          archived: false
+          currentStreak: 5
+          createdAt: 2000-01-23T04:56:07.000+00:00
+        - id: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+          title: Пить воду
+          description: Два литра в день
+          frequency: DAILY
+          targetPerPeriod: 1
+          archived: false
+          currentStreak: 5
+          createdAt: 2000-01-23T04:56:07.000+00:00
+        total: 0
+        limit: 6
+        offset: 1
+      properties:
+        items:
+          items:
+            $ref: "#/components/schemas/Habit"
+          title: items
+          type: array
+        total:
+          description: Сколько всего привычек подходит под фильтр.
+          minimum: 0
+          title: total
+          type: integer
+        limit:
+          title: limit
+          type: integer
+        offset:
+          title: offset
+          type: integer
+      required:
+      - items
+      - limit
+      - offset
+      - total
+      title: HabitPage
+      type: object
+    Error:
+      description: Единый формат ошибки.
+      example:
+        code: habit_not_found
+        message: Привычка не найдена
+        fieldErrors:
+        - field: title
+          message: не может быть пустым
+        - field: title
+          message: не может быть пустым
+      properties:
+        code:
+          description: Машиночитаемый код причины.
+          example: habit_not_found
+          title: code
+          type: string
+        message:
+          description: "Объяснение для человека. Внутренности сервера (стек, SQL)\
+            \ сюда не попадают."
+          example: Привычка не найдена
+          title: message
+          type: string
+        fieldErrors:
+          description: Какие поля не прошли проверку (только для 400).
+          items:
+            $ref: "#/components/schemas/FieldError"
+          title: fieldErrors
+          type: array
+      required:
+      - code
+      - message
+      title: Error
+      type: object
+    FieldError:
+      description: Ошибка в одном поле запроса.
+      example:
+        field: title
+        message: не может быть пустым
+      properties:
+        field:
+          example: title
+          title: field
+          type: string
+        message:
+          example: не может быть пустым
+          title: message
+          type: string
+      required:
+      - field
+      - message
+      title: FieldError
+      type: object
+  securitySchemes:
+    bearerAuth:
+      bearerFormat: JWT
+      description: "JWT, выданный сервисом авторизации. По нему определяется текущ\
+        ий пользователь."
+      scheme: bearer
+      type: http
